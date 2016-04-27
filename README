@@ -1,0 +1,4 @@
+EPIC 211098454: period 1.129d, stable signal
+EPIC 211000411: period 8.589d, evolving signal
+
+Both objects are Pleiades members. Each text file contains time (in HJD-2454833), flux (after removing K2 systematics and outliers), and flux uncertainty (as estimated by our GP model, see arXiv:1603.09167
