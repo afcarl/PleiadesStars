@@ -103,6 +103,14 @@ if __name__ == '__main__':
     ap = ArgumentParser()
     ap.add_argument('infile', metavar='IF', type=str, help='input file')
     ap.add_argument('period', metavar='P', type=float, help='initial period estimate')
+    ap.add_argument('--output_dir', metavar='OD', type=str, \
+                    default='.', help='directory to store output in')
+    ap.add_argument('--nsteps', metavar='NS', type=int, default=1000, \
+                    help='number of MCMC steps')
+    ap.add_argument('--nwalkers', metavar='NW', type=int, default=24, \
+                    help='number of MCMC walkers')
+    ap.add_argument('--force-mcmc', action='store_true', default=False, \
+                    help='re-run MCMC even if results file exists')
     args = ap.parse_args()
 
     t, y, ye = readLC(args.infile)
@@ -118,19 +126,33 @@ if __name__ == '__main__':
     pl.title(fname)
 
     # do MCMC
-    nwalkers = 24
-    p_init = np.array([-3.0, 0.5, args.period, 1.15, -5.65])
-    ndim = len(p_init)
-    p0 = [np.array(p_init) + 1e-8 * np.random.randn(ndim) \
-          for i in xrange(nwalkers)]
+    mcmc_output_file = '%s_chain.dat' % fname
     ss = 1
     dt = np.median(t[1:] - t[:-1])
     while ((20 * dt * ss) < args.period):
         ss += 1
     ss -= 1
-    print 'Subsampling by factor %d' % ss
-    print 'Delta t effective %.2f' % (dt * ss)
-    print 'No. samples per period %.1f' % (args.period / dt / ss)
+    if (os.path.exists(mcmc_output_file) == False) or (args.force_mcmc == True):
+        p_init = np.array([-3.0, 0.5, args.period, 1.15, -5.65])
+        ndim = len(p_init)
+        p0 = [np.array(p_init) + 1e-8 * np.random.randn(ndim) \
+            for i in xrange(args.nwalkers)]
+        print 'Subsampling by factor %d' % ss
+        print 'Delta t effective %.2f' % (dt * ss)
+        print 'No. samples per period %.1f' % (args.period / dt / ss)
+        f = open(mcmc_output_file, 'w')
+        f.close()
+        for result in \
+          sampler.sample(p0, iterations = args.nsteps, storechain = False):
+            position = result[0]
+            lnp = result[1]
+            f = open(mcmc_output_file, 'a')
+            for k in range(position.shape[0]):
+                f.write("{0:4d} {1:s}\n".format(k, " ".join(position[k])))
+            f.close()
+
+    raw_input('Take a look at %s' % mcmc_output_file)
+    
     sampler = emcee.EnsembleSampler(nwalkers, ndim, lnprob_QP1, \
                                     args = (t[::ss], y[::ss], args.period))
     labels = [r"$\log a$", r"$\log \tau_p$", \
