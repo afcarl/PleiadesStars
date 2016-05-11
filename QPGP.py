@@ -98,6 +98,24 @@ def plotsample_QP1(p, t, y):
     gp.compute(t, yerr)
     mu = gp.sample_conditional(y, t)
     pl.plot(t, mu, color="#4682b4", alpha=0.3)
+
+def plotpred_QP1(p, t, y):
+    ln_a, ln_tau_p, period, ln_tau_e_rel, ln_sig = p
+    a, tau_p, tau_e_rel, sig = \
+      np.exp(ln_a), np.exp(ln_tau_p), np.exp(ln_tau_e_rel), np.exp(ln_sig)
+    a2 = a**2
+    gamma_p = 1. / 2. / tau_p**2
+    tau_e = tau_e_rel * period
+    metric_e = tau_e**2
+    gp = GP(a * kernels.ExpSine2Kernel(gamma_p, period) * \
+            kernels.ExpSquaredKernel(metric_e))
+    a, tau = np.exp(p[:2])
+    yerr = np.ones(len(y)) * sig
+    gp.compute(t, yerr)
+    mu, cov = gp.predict(y, t)
+    sig = np.diag(cov)
+    pl.fill_between(t, mu + 2 * sig, mu - 2 * sig, color="#4682b4", alpha=0.3)
+    pl.plot(t, mu,  color="#4682b4", lw = 2)
     
 if __name__ == '__main__':
     ap = ArgumentParser()
@@ -123,23 +141,27 @@ if __name__ == '__main__':
     pl.xlabel('time (d)')
     pl.ylabel('norm. flux')
     fname = os.path.splitext(os.path.split(args.infile)[-1])[0]
+    dfname = '%s/%s' % (args.output_dir, fname)
     pl.title(fname)
 
     # do MCMC
-    mcmc_output_file = '%s_chain.dat' % fname
-    ss = 1
-    dt = np.median(t[1:] - t[:-1])
-    while ((20 * dt * ss) < args.period):
-        ss += 1
-    ss -= 1
+    mcmc_output_file = '%s_QPGP_chain.dat' % dfname
     if (os.path.exists(mcmc_output_file) == False) or (args.force_mcmc == True):
+        print 'Doing MCMC'
         p_init = np.array([-3.0, 0.5, args.period, 1.15, -5.65])
         ndim = len(p_init)
         p0 = [np.array(p_init) + 1e-8 * np.random.randn(ndim) \
             for i in xrange(args.nwalkers)]
+        ss = 1
+        dt = np.median(t[1:] - t[:-1])
+        while ((20 * dt * ss) < args.period):
+            ss += 1
+        ss -= 1
         print 'Subsampling by factor %d' % ss
         print 'Delta t effective %.2f' % (dt * ss)
         print 'No. samples per period %.1f' % (args.period / dt / ss)
+        sampler = emcee.EnsembleSampler(args.nwalkers, ndim, lnprob_QP1, \
+                                        args = (t[::ss], y[::ss], args.period))
         f = open(mcmc_output_file, 'w')
         f.close()
         for result in \
@@ -148,57 +170,56 @@ if __name__ == '__main__':
             lnp = result[1]
             f = open(mcmc_output_file, 'a')
             for k in range(position.shape[0]):
-                f.write("{0:4d} {1:s}\n".format(k, " ".join(position[k])))
+                print ("{0:4d} {1:s}\n".format(k, " ".join(map(repr,position[k]))))
+                f.write("{0:4d} {1:s}\n".format(k, " ".join(map(repr,position[k]))))
             f.close()
-
-    raw_input('Take a look at %s' % mcmc_output_file)
+            raw_input('Take a look at %s' % mcmc_output_file)
     
-    sampler = emcee.EnsembleSampler(nwalkers, ndim, lnprob_QP1, \
-                                    args = (t[::ss], y[::ss], args.period))
-    labels = [r"$\log a$", r"$\log \tau_p$", \
-              r"$P \, [\mathrm{days}]$", \
-              r"$\log \tau_e \, [\mathrm{periods}]$", \
-              r"$\log \sigma_w$"]
-    print("Running MCMC...")
-    sampler.run_mcmc(p0, 1000)
+    # labels = [r"$\log a$", r"$\log \tau_p$", \
+    #           r"$P \, [\mathrm{days}]$", \
+    #           r"$\log \tau_e \, [\mathrm{periods}]$", \
+    #           r"$\log \sigma_w$"]
+    # print("Running MCMC...")
+    # sampler.run_mcmc(p0, 1000)
     
-    # Plot chains to check convergence
-    samples = plotchains(sampler, labels)
-    nwalker, nit, ndim = samples.shape
-    samples = samples.reshape((nwalker * nit, ndim))
-    pl.savefig('%s_QPGP_chains.png' % fname)
+    # # Plot chains to check convergence
+    # samples = plotchains(sampler, labels)
+    # nwalker, nit, ndim = samples.shape
+    # samples = samples.reshape((nwalker * nit, ndim))
+    # pl.savefig('%s_QPGP_chains.png' % dfname)
     
-    # Plot posterior samples
-    ss = 1
-    while ((80 * dt * ss) < args.period):
-        ss += 1
-    ss -= 1
-    nsamp_tpl = 10
-    pl.figure(1)
-    for s in samples[np.random.randint(len(samples), size = nsamp_tpl)]:
-        plotsample_QP1(s, t[::ss], y[::ss])
-    pl.xlim(t[0], t[-1])
-    pl.savefig('%s_QPGP_data.png' % fname)
+    # # Plot posterior predictive mean and variance
+    # ss = 1
+    # while ((80 * dt * ss) < args.period):
+    #     ss += 1
+    # ss -= 1
+    # nsamp_tpl = 10
+    # pl.figure(1)
+    # plotpred_QP1(s, t[::ss], y[::ss])
+    # # for s in samples[np.random.randint(len(samples), size = nsamp_tpl)]:
+    # #     plotsamples_QP1(s, t[::ss], y[::ss])
+    # pl.xlim(t[0], t[-1])
+    # pl.savefig('%s_QPGP_data.png' % dfname)
 
-    # Now do the corner plot
-    fig2 = corner.corner(samples, \
-                         labels = labels, \
-                         quantiles=[0.16, 0.5, 0.84], \
-                         show_titles=True, title_kwargs={"fontsize": 12})
-    pl.savefig('%s_QPGP_corner_orig.png' % fname)
+    # # Now do the corner plot
+    # fig2 = corner.corner(samples, \
+    #                      labels = labels, \
+    #                      quantiles=[0.16, 0.5, 0.84], \
+    #                      show_titles=True, title_kwargs={"fontsize": 12})
+    # pl.savefig('%s_QPGP_corner_orig.png' % dfname)
 
-    # More intuitive parameters
-    samples_rescaled = samples.copy()
-    samples_rescaled[:,0] = np.exp(samples[:,0]) * 100
-    samples_rescaled[:,1] = np.exp(samples[:,1])
-    samples_rescaled[:,3] = np.exp(samples[:,3])
-    samples_rescaled[:,4] = np.exp(samples[:,4]) * 1e6
-    labels_rescaled = [r"$a \, [\%]$", r"$\tau_p$", \
-                       r"$P \, [\mathrm{days}]$", \
-                       r"$\tau_e \, [\mathrm{periods}]$", \
-                       r"$\sigma_w \, [\mathrm{ppm}]$"]
-    fig4 = corner.corner(samples_rescaled, \
-                         labels = labels_rescaled, \
-                         quantiles=[0.16, 0.5, 0.84], \
-                         show_titles=True, title_kwargs={"fontsize": 12})
-    pl.savefig('%s_QPGP_corner_rescaled.png' % fname)
+    # # More intuitive parameters
+    # samples_rescaled = samples.copy()
+    # samples_rescaled[:,0] = np.exp(samples[:,0]) * 100
+    # samples_rescaled[:,1] = np.exp(samples[:,1])
+    # samples_rescaled[:,3] = np.exp(samples[:,3])
+    # samples_rescaled[:,4] = np.exp(samples[:,4]) * 1e6
+    # labels_rescaled = [r"$a \, [\%]$", r"$\tau_p$", \
+    #                    r"$P \, [\mathrm{days}]$", \
+    #                    r"$\tau_e \, [\mathrm{periods}]$", \
+    #                    r"$\sigma_w \, [\mathrm{ppm}]$"]
+    # fig4 = corner.corner(samples_rescaled, \
+    #                      labels = labels_rescaled, \
+    #                      quantiles=[0.16, 0.5, 0.84], \
+    #                      show_titles=True, title_kwargs={"fontsize": 12})
+    # pl.savefig('%s_QPGP_corner_rescaled.png' % dfname)
