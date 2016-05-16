@@ -3,8 +3,11 @@ from george import GP, kernels
 import emcee, corner
 import pylab as pl
 from argparse import ArgumentParser
-import os.path
+import os.path, subprocess
 import matplotlib.gridspec as gridspec
+
+# Syntax for converting to animated gif:
+# convert -set delay 20 -set pause 200 -colorspace GRAY -colors 256 -dispose 1 -loop 0 -scale 50% epic210969800_QPGP_corner_???.png test.gif
 
 def readLC(file):
     X = np.genfromtxt(file).T
@@ -15,32 +18,29 @@ def readLC(file):
     return t, y, ye
 
 def lnlike_QP1(p, t, y):
-    ln_a, ln_tau_p, period, ln_tau_e_rel, ln_sig = p
-    a, tau_p, tau_e_rel, sig = \
-      np.exp(ln_a), np.exp(ln_tau_p), np.exp(ln_tau_e_rel), np.exp(ln_sig)
-    a2 = a**2
-    gamma_p = 1. / 2. / tau_p**2
-    tau_e = tau_e_rel * period
-    metric_e = tau_e**2
-    gp = GP(a * kernels.ExpSine2Kernel(gamma_p, period) * \
-            kernels.ExpSquaredKernel(metric_e))
-    a, tau = np.exp(p[:2])
+    log_a, log_gamma, period, log_tau, log_sig_ppt = p
+    a_sq, gamma, tau_sq, sig = \
+      10.0**(2*log_a), 10.0**log_gamma, 10.0**(2*log_tau), \
+      10.0**(log_sig_ppt-3)
+    gp = GP(a_sq * kernels.ExpSine2Kernel(gamma, period) * \
+            kernels.ExpSquaredKernel(tau_sq))
     yerr = np.ones(len(y)) * sig
     gp.compute(t, yerr)
     return gp.lnlikelihood(y)
     
 def lnprior_QP1(p, per_init):
     """Jeffreys priors all round except for period where it's uniform"""
-    ln_a, ln_tau_p, period, ln_tau_e_rel, ln_sig = p
-    if (ln_a < -7) or (ln_a > 1):
+    log_a, log_gamma, period, log_tau, log_sig_ppt = p
+    log_tau_rel = log_tau - np.log10(per_init) 
+    if (log_a < -3) or (log_a > 0):
         return -np.inf
-    if (ln_tau_p < -1.4) or (ln_tau_p > 2.3):
+    if (log_gamma < -2.5) or (log_gamma > 1):
         return -np.inf
     if (period < (0.5 * per_init)) or (period > (2.0 * per_init)):
         return -np.inf
-    if (ln_tau_e_rel < 0.0) or (ln_tau_e_rel > 4.0):
+    if (log_tau_rel < 0.0) or (log_tau_rel > 2.0):
         return -np.inf    
-    if (ln_sig < -9) or (ln_sig > -2.3):
+    if (log_sig_ppt < -1) or (log_sig_ppt > 2):
         return -np.inf
     return 0.0
 
@@ -52,13 +52,11 @@ def lnprob_QP1(p, t, y, per_init):
     else:
         return -np.inf
 
-def plotchains(sampler, labels):
-    samples = sampler.chain
-    lnp = sampler.lnprobability
+def plotchains(samples, lnp, labels, do_cut = False):
     nwalkers, nsteps, ndim = samples.shape
     fig = pl.figure(figsize=(8, ndim + 1))
     gs = gridspec.GridSpec(ndim+1, 1)
-    gs.update(left=0.15, right=0.98, bottom = 0.07, top = 0.93, hspace=0.01)
+    gs.update(left=0.15, right=0.98, bottom = 0.1, top = 0.98, hspace=0.0)
     ax1 = pl.subplot(gs[0,0])    
     ax1.yaxis.set_major_locator(pl.MaxNLocator(5, prune = 'both'))
     pl.setp(ax1.get_xticklabels(), visible=False)
@@ -76,45 +74,41 @@ def plotchains(sampler, labels):
         if i == (ndim-1):
             pl.xlabel('iteration')
     pl.show(block=False)
-    ans = int(raw_input('Enter number of iterations to discard as burn-in: '))
-    for i in range(ndim+1):
-        axc = pl.subplot(gs[i,0])
-        pl.axvline(ans, color="#4682b4")
-    print 'Discarding first %d steps as burn-in' % ans
-    return samples[:,ans:,:]
-                     
+    if do_cut == True:
+        ans = int(raw_input('Enter number of iterations to discard as burn-in: '))
+        for i in range(ndim+1):
+            axc = pl.subplot(gs[i,0])
+            pl.axvline(ans, color="#4682b4")
+        print 'Discarding first %d steps as burn-in' % ans
+        return fig, samples[:,ans:,:], lnp[:,ans:]
+    else:
+        return fig, samples, lnp
+    
 def plotsample_QP1(p, t, y):
-    ln_a, ln_tau_p, period, ln_tau_e_rel, ln_sig = p
-    a, tau_p, tau_e_rel, sig = \
-      np.exp(ln_a), np.exp(ln_tau_p), np.exp(ln_tau_e_rel), np.exp(ln_sig)
-    a2 = a**2
-    gamma_p = 1. / 2. / tau_p**2
-    tau_e = tau_e_rel * period
-    metric_e = tau_e**2
-    gp = GP(a * kernels.ExpSine2Kernel(gamma_p, period) * \
-            kernels.ExpSquaredKernel(metric_e))
-    a, tau = np.exp(p[:2])
+    log_a, log_gamma, period, log_tau, log_sig_ppt = p
+    a_sq, gamma, tau_sq, sig = \
+      10.0**(2*log_a), 10.0**log_gamma, 10.0**(2*log_tau), \
+      10.0**(log_sig_ppt-3)
+    gp = GP(a_sq * kernels.ExpSine2Kernel(gamma, period) * \
+            kernels.ExpSquaredKernel(tau_sq))
     yerr = np.ones(len(y)) * sig
     gp.compute(t, yerr)
     mu = gp.sample_conditional(y, t)
     pl.plot(t, mu, color="#4682b4", alpha=0.3)
 
 def plotpred_QP1(p, t, y):
-    ln_a, ln_tau_p, period, ln_tau_e_rel, ln_sig = p
-    a, tau_p, tau_e_rel, sig = \
-      np.exp(ln_a), np.exp(ln_tau_p), np.exp(ln_tau_e_rel), np.exp(ln_sig)
-    a2 = a**2
-    gamma_p = 1. / 2. / tau_p**2
-    tau_e = tau_e_rel * period
-    metric_e = tau_e**2
-    gp = GP(a * kernels.ExpSine2Kernel(gamma_p, period) * \
-            kernels.ExpSquaredKernel(metric_e))
-    a, tau = np.exp(p[:2])
+    log_a, log_gamma, period, log_tau, log_sig_ppt = p
+    a_sq, gamma, tau_sq, sig = \
+      10.0**(2*log_a), 10.0**log_gamma, 10.0**(2*log_tau), \
+      10.0**(log_sig_ppt-3)
+    gp = GP(a_sq * kernels.ExpSine2Kernel(gamma, period) * \
+            kernels.ExpSquaredKernel(tau_sq))
     yerr = np.ones(len(y)) * sig
     gp.compute(t, yerr)
     mu, cov = gp.predict(y, t)
-    sig = np.diag(cov)
-    pl.fill_between(t, mu + 2 * sig, mu - 2 * sig, color="#4682b4", alpha=0.3)
+    sigma = np.diag(cov)
+    sigma = np.sqrt(sigma**2 + yerr**2)
+    pl.fill_between(t, mu + 2 * sigma, mu - 2 * sigma, color="#4682b4", alpha=0.3)
     pl.plot(t, mu,  color="#4682b4", lw = 2)
     
 if __name__ == '__main__':
@@ -127,13 +121,21 @@ if __name__ == '__main__':
                     help='number of MCMC steps')
     ap.add_argument('--nwalkers', metavar='NW', type=int, default=24, \
                     help='number of MCMC walkers')
-    ap.add_argument('--force-mcmc', action='store_true', default=False, \
+    ap.add_argument('--do-mcmc', action='store_true', default=False, \
                     help='re-run MCMC even if results file exists')
+    ap.add_argument('--plot-progress', action='store_true', default=True, \
+                    help='store incremental chain and corner plots after each batch of ~100 iterations')
+    ap.add_argument('--plot-pred', action='store_true', default=True, \
+                    help='in addition to chains and corner plot, plot LC with predictive distribution after MCMC has finished')
     args = ap.parse_args()
 
     t, y, ye = readLC(args.infile)
+    dt = np.median(t[1:] - t[:-1])
+    T = t[-1] - t[0]
     sig = (y[1:] - y[:-1]).std() / np.sqrt(2)
-    h = y.var()
+    ys = np.sort(y)
+    n = len(y)
+    h = ys[int(0.95*n)] - ys[int(0.05*n)]
     ye[:] = sig
     
     pl.figure(1)
@@ -145,15 +147,23 @@ if __name__ == '__main__':
     pl.title(fname)
 
     # do MCMC
-    mcmc_output_file = '%s_QPGP_chain.dat' % dfname
-    if (os.path.exists(mcmc_output_file) == False) or (args.force_mcmc == True):
-        print 'Doing MCMC'
-        p_init = np.array([-3.0, 0.5, args.period, 1.15, -5.65])
+    mcmc_output_file = '%s_QPGP_mcmc.npz' % dfname
+    print 'Saving / looking for MCMC output in %s' % mcmc_output_file
+    chainplot_root = '%s_QPGP_chains' % dfname
+    cornerplot_root = '%s_QPGP_corner' % dfname
+    labels = [r"$\log_{10}  \, a$", r"$\log_{10} \, \Gamma$", \
+              r"$P \, [\mathrm{days}]$", \
+              r"$\log_{10}  \, \tau [\mathrm{days}]$", \
+              r"$\log_{10}  \, \sigma_w [ppt]$"]
+    labels_nolatex = ['log_a', 'log_Gamma', 'P (d)', 'log_tau (d)', 'log_wn (ppt)']
+    if (os.path.exists(mcmc_output_file) == False) or (args.do_mcmc == True):
+        print 'Doing MCMC, %d walkers, %d iterations' % (args.nwalkers, args.nsteps)
+        p_init = np.array([np.log10(np.sqrt(h)), -0.5, args.period, \
+                           min(np.log10(args.period * 5.0), T), np.log10(sig)+3])
         ndim = len(p_init)
         p0 = [np.array(p_init) + 1e-8 * np.random.randn(ndim) \
             for i in xrange(args.nwalkers)]
         ss = 1
-        dt = np.median(t[1:] - t[:-1])
         while ((20 * dt * ss) < args.period):
             ss += 1
         ss -= 1
@@ -162,64 +172,73 @@ if __name__ == '__main__':
         print 'No. samples per period %.1f' % (args.period / dt / ss)
         sampler = emcee.EnsembleSampler(args.nwalkers, ndim, lnprob_QP1, \
                                         args = (t[::ss], y[::ss], args.period))
-        f = open(mcmc_output_file, 'w')
-        f.close()
-        for result in \
-          sampler.sample(p0, iterations = args.nsteps, storechain = False):
-            position = result[0]
-            lnp = result[1]
-            f = open(mcmc_output_file, 'a')
-            for k in range(position.shape[0]):
-                print ("{0:4d} {1:s}\n".format(k, " ".join(map(repr,position[k]))))
-                f.write("{0:4d} {1:s}\n".format(k, " ".join(map(repr,position[k]))))
-            f.close()
-            raw_input('Take a look at %s' % mcmc_output_file)
-    
-    # labels = [r"$\log a$", r"$\log \tau_p$", \
-    #           r"$P \, [\mathrm{days}]$", \
-    #           r"$\log \tau_e \, [\mathrm{periods}]$", \
-    #           r"$\log \sigma_w$"]
-    # print("Running MCMC...")
-    # sampler.run_mcmc(p0, 1000)
-    
-    # # Plot chains to check convergence
-    # samples = plotchains(sampler, labels)
-    # nwalker, nit, ndim = samples.shape
-    # samples = samples.reshape((nwalker * nit, ndim))
-    # pl.savefig('%s_QPGP_chains.png' % dfname)
-    
-    # # Plot posterior predictive mean and variance
-    # ss = 1
-    # while ((80 * dt * ss) < args.period):
-    #     ss += 1
-    # ss -= 1
-    # nsamp_tpl = 10
-    # pl.figure(1)
-    # plotpred_QP1(s, t[::ss], y[::ss])
-    # # for s in samples[np.random.randint(len(samples), size = nsamp_tpl)]:
-    # #     plotsamples_QP1(s, t[::ss], y[::ss])
-    # pl.xlim(t[0], t[-1])
-    # pl.savefig('%s_QPGP_data.png' % dfname)
+        nsteps_batch = min(10, args.nsteps)
+        nbatch = np.ceil(args.nsteps / nsteps_batch).astype('int')
+        for i in range(nbatch):
+            p0, _, _ = sampler.run_mcmc(p0, nsteps_batch)
+            samples = sampler.chain
+            lnp = sampler.lnprobability
+            np.savez_compressed(mcmc_output_file, samples = samples, lnp = lnp)
+            if args.plot_progress:                
+                if i == nbatch - 1:
+                    nsteps = min(nsteps_batch, args.nsteps - i * nsteps_batch)
+                else:
+                    nsteps = nsteps_batch
+                if i > 0:
+                    pl.close(fig2)
+                    pl.close(fig3)
+                fig2, samples, lnp = plotchains(samples, lnp, labels, do_cut = False)
+                pl.savefig('%s_%03d.png' % (chainplot_root, i))
+                nwalker, nit, ndim = samples.shape
+                samples_flat = samples.reshape((nwalker * nit, ndim))
+                fig3 = corner.corner(samples_flat, labels = labels, \
+                                     quantiles=[0.16, 0.5, 0.84], \
+                                     show_titles=True, title_kwargs={"fontsize": 12})
+                pl.savefig('%s_%03d.png' % (cornerplot_root, i))
+            print 'Batch %d of %d done (%d steps per batch)' % (i+1, nbatch, nsteps_batch)
+        if args.plot_progress:
+            pl.close(fig2)
+            pl.close(fig3)
+    else:
+        data = np.load(mcmc_output_file)
+        samples = data['samples']
+        lnp = data['lnp']
+        
+    print 'Producing final plots'
+    fig2, samples, lnp = plotchains(samples, lnp, labels, do_cut = True)
+    nwalker, nit, ndim = samples.shape
+    samples_flat = samples.reshape((nwalker * nit, ndim))
+    pl.savefig('%s_final.png' % chainplot_root)    
+    fig3 = corner.corner(samples_flat, \
+                         labels = labels, \
+                         quantiles=[0.16, 0.5, 0.84], \
+                         show_titles=True, title_kwargs={"fontsize": 12})
+    pl.savefig('%s_final.png' % cornerplot_root)
 
-    # # Now do the corner plot
-    # fig2 = corner.corner(samples, \
-    #                      labels = labels, \
-    #                      quantiles=[0.16, 0.5, 0.84], \
-    #                      show_titles=True, title_kwargs={"fontsize": 12})
-    # pl.savefig('%s_QPGP_corner_orig.png' % dfname)
-
-    # # More intuitive parameters
-    # samples_rescaled = samples.copy()
-    # samples_rescaled[:,0] = np.exp(samples[:,0]) * 100
-    # samples_rescaled[:,1] = np.exp(samples[:,1])
-    # samples_rescaled[:,3] = np.exp(samples[:,3])
-    # samples_rescaled[:,4] = np.exp(samples[:,4]) * 1e6
-    # labels_rescaled = [r"$a \, [\%]$", r"$\tau_p$", \
-    #                    r"$P \, [\mathrm{days}]$", \
-    #                    r"$\tau_e \, [\mathrm{periods}]$", \
-    #                    r"$\sigma_w \, [\mathrm{ppm}]$"]
-    # fig4 = corner.corner(samples_rescaled, \
-    #                      labels = labels_rescaled, \
-    #                      quantiles=[0.16, 0.5, 0.84], \
-    #                      show_titles=True, title_kwargs={"fontsize": 12})
-    # pl.savefig('%s_QPGP_corner_rescaled.png' % dfname)
+    nit = nwalker * nit
+    print 'Total number of MCMC samples kept: %d' % nit
+    imax = np.argmax(lnp.flatten())
+    print '{0:20s} = {1:10s} + {2:10s} - {3:10s} ({4:10s})'.format('Parameter', 'median', '1sig', '1sig', 'MAP value')
+    for i in range(len(labels_nolatex)):
+        ss = samples_flat[:,i].flatten()
+        most_prob = ss[imax]
+        ss = np.sort(ss)
+        med = ss[nit/2]
+        top = ss[int(nit*0.84)]
+        bot = ss[int(nit*0.16)]
+        print '{0:20s} = {1:10g} + {2:10g} - {3:10g} ({4:10g})'.format(labels_nolatex[i], med, top-med, med-bot, most_prob)
+        
+    if args.plot_pred == True:
+        print 'Plotting LC with predictive distribution'
+        ss = 1
+        while ((80 * dt * ss) < args.period):
+            ss += 1
+        ss -= 1
+        nsamp_tpl = 10
+        pl.figure(1)
+        plotpred_QP1(samples_flat[imax,:], t[::ss], y[::ss])
+        # for s in samples[np.random.randint(len(samples), size = nsamp_tpl)]:
+        #     plotsamples_QP1(s, t[::ss], y[::ss])
+        pl.xlim(t[0], t[-1])
+        pl.savefig('%s_QPGP_pred.png' % dfname)
+        pl.show()
