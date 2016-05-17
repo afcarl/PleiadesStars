@@ -17,7 +17,7 @@ def readLC(file):
     ye = ye / ym
     return t, y, ye
 
-def gp_QP(p):
+def kern_QP(p):
     nper = (len(p) - 1) / 4
     for i in range(nper):
         log_a, log_gamma, period, log_tau = p[i*4:i*4+4]
@@ -25,21 +25,23 @@ def gp_QP(p):
         gamma = 10.0**log_gamma
         tau_sq = 10.0**(2*log_tau)
         if i == 0:
-            gp = GP(a_sq * kernels.ExpSine2Kernel(gamma, period) * \
-                    kernels.ExpSquaredKernel(tau_sq))
+            kern = a_sq * kernels.ExpSine2Kernel(gamma, period) * \
+              kernels.ExpSquaredKernel(tau_sq)
         else:
-            gp += GP(a_sq * kernels.ExpSine2Kernel(gamma, period) * \
-                     kernels.ExpSquaredKernel(tau_sq))
+            kern += a_sq * kernels.ExpSine2Kernel(gamma, period) * \
+              kernels.ExpSquaredKernel(tau_sq)
     log_sig_ppt = p[-1]
     sig = 10.0**(log_sig_ppt-3)
-    return gp, sig
+    return kern, sig
 
 def lnprior_QP(p, per_init):
     """Jeffreys priors all round except for period where it's uniform"""
     nper = len(per_init)
+    periods = []
     for i in range(nper):
         log_a, log_gamma, period, log_tau = p[i*4:i*4+4]
-        log_tau_rel = log_tau - np.log10(per_init) 
+        periods.append(period)
+        log_tau_rel = log_tau - np.log10(per_init[i]) 
         if (log_a < -3) or (log_a > 0):
             return -np.inf
         if (log_gamma < -2.5) or (log_gamma > 1):
@@ -51,10 +53,17 @@ def lnprior_QP(p, per_init):
     log_sig_ppt = p[-1]
     if (log_sig_ppt < -1) or (log_sig_ppt > 2):
         return -np.inf
+    # Make sure the periods stay in a given order [ugh! how inefficient!]
+    if nper > 1:
+        s1 = np.argsort(per_init)
+        s2 = np.argsort(np.array(periods))
+        if (s1 == s2).all() == False:
+            return -np.inf
     return 0.0
 
 def lnlike_QP(p, t, y):
-    gp, sig = gp_QP(p)
+    kern, sig = kern_QP(p)
+    gp = GP(kern)
     yerr = np.ones(len(y)) * sig
     gp.compute(t, yerr)
     return gp.lnlikelihood(y)
@@ -68,7 +77,8 @@ def lnprob_QP(p, t, y, per_init):
         return -np.inf
     
 def plotsample_QP(p, t, y):
-    gp, sig = gp_QP(p)
+    kern, sig = kern_QP(p)
+    gp = GP(kern)
     yerr = np.ones(len(y)) * sig
     gp.compute(t, yerr)
     mu = gp.sample_conditional(y, t)
@@ -76,7 +86,8 @@ def plotsample_QP(p, t, y):
     return
 
 def plotpred_QP(p, t, y):
-    gp, sig = gp_QP(p)
+    kern, sig = kern_QP(p)
+    gp = GP(kern)
     yerr = np.ones(len(y)) * sig
     gp.compute(t, yerr)
     mu, cov = gp.predict(y, t)
@@ -85,16 +96,34 @@ def plotpred_QP(p, t, y):
     pl.fill_between(t, mu + 2 * sigma, mu - 2 * sigma, \
                     color="#cc9900", alpha=0.3)
     pl.plot(t, mu, color="#cc9900", lw = 2)
+    nper = (len(p) - 1) / 4
+    # if nper > 1:
+    #     cols = ['c','m','y','k']
+    #     for i in range(nper):
+    #         p1 = np.append(p[i*4:i*4+4], p[-1])
+    #         k1, sig = kern_QP(p1)
+    #         b = gp.solver.apply_inverse(y)
+    #         X = np.transpose([t])
+    #         K1 = k1.value(t, t)
+    #         mu1 = np.dot(K1, b)
+    #         col = np.roll(cols, -i)[0]
+    #         pl.plot(t, mu, color = col, lw = 2)
     return
 
-def labels_QP(nper, latex = True):
+def labels_QP(nper, latex = True, merge = False):
     labels = []
     if latex == True:
-        for i in range(nper):
-            labels.append(r"$\log_{10}  \, a_%d$" % (i+1))
-            labels.append(r"$\log_{10} \, \Gamma_%d$" % (i+1))
-            labels.append(r"$P_%d \, [\mathrm{days}]$" % (i+1))
-            labels.append(r"$\log_{10}  \, \tau_%d [\mathrm{days}]$" % (i+1))
+        if merge == True:
+            labels.append(r"$\log_{10}  \, a$")
+            labels.append(r"$\log_{10} \, \Gamma$")
+            labels.append(r"$P \, [\mathrm{days}]$")
+            labels.append(r"$\log_{10} \, \tau [\mathrm{days}]$")
+        else:
+            for i in range(nper):
+                labels.append(r"$\log_{10}  \, a_%d$" % (i+1))
+                labels.append(r"$\log_{10} \, \Gamma_%d$" % (i+1))
+                labels.append(r"$P_%d \, [\mathrm{days}]$" % (i+1))
+                labels.append(r"$\log_{10}  \, \tau_%d [\mathrm{days}]$" % (i+1))
         labels.append(r"$\log_{10}  \, \sigma_w [\mathrm{ppt}]$")
     else:
         for i in range(nper):
@@ -108,30 +137,36 @@ def labels_QP(nper, latex = True):
 def plotchains(samples, lnp, do_cut = False):
     nwalkers, nsteps, ndim = samples.shape
     nper = (ndim - 1)/4
-    labels = labels_QP(nper)
-    fig = pl.figure(figsize=(8, 1.5*(ndim + 1)))
-    gs = gridspec.GridSpec(ndim+1, 1)
+    cols = ['c','m','y','k']
+    labels = labels_QP(nper, merge = True)
+    fig = pl.figure(figsize=(8, 1.5*6))
+    gs = gridspec.GridSpec(6, 1)
     gs.update(left=0.15, right=0.98, bottom = 0.1, top = 0.98, hspace=0.0)
     ax1 = pl.subplot(gs[0,0])    
     ax1.yaxis.set_major_locator(pl.MaxNLocator(5, prune = 'both'))
     pl.setp(ax1.get_xticklabels(), visible=False)
     pl.ylabel(r"$\log \, \mathrm{posterior}$")
     for j in range(nwalkers):
-        pl.plot(lnp[j,:], color="#cc9900", alpha=0.3)
-    for i in range(ndim):
+        pl.plot(lnp[j,:], color='k', alpha=0.3)
+    for i in range(4):
         axc = pl.subplot(gs[i+1,0])    
         axc.yaxis.set_major_locator(pl.MaxNLocator(5, prune = 'both'))
-        if i < (ndim-1):
-            pl.setp(axc.get_xticklabels(), visible=False)
+        pl.setp(axc.get_xticklabels(), visible=False)
         pl.ylabel(labels[i])
         for j in range(nwalkers):
-            pl.plot(samples[j,:,i], color="#cc9900", alpha = 0.3)
-        if i == (ndim-1):
-            pl.xlabel('iteration')
+            for k in range(nper):
+                col = np.roll(cols, -k)[0]
+                pl.plot(samples[j,:,k*4+i], color=col, alpha = 0.3)
+    axc = pl.subplot(gs[-1,0])    
+    axc.yaxis.set_major_locator(pl.MaxNLocator(5, prune = 'both'))
+    pl.ylabel(labels[i])
+    for j in range(nwalkers):
+        pl.plot(samples[j,:,-1], color='k', alpha = 0.3)
+    pl.xlabel('iteration')
     pl.show(block=False)
     if do_cut == True:
         ans = int(raw_input('Enter number of iterations to discard as burn-in: '))
-        for i in range(ndim+1):
+        for i in range(6):
             axc = pl.subplot(gs[i,0])
             pl.axvline(ans, color="#cc9900")
         print 'Discarding first %d steps as burn-in' % ans
@@ -196,7 +231,7 @@ if __name__ == '__main__':
         ss -= 1
         print 'Subsampling by factor %d' % ss
         print 'Delta t effective %.2f' % (dt * ss)
-        print 'No. samples per period %.1f' % (args.period / dt / ss)
+        print 'No. samples per period %.1f' % (min(args.period) / dt / ss)
         sampler = emcee.EnsembleSampler(args.nwalkers, ndim, lnprob_QP, \
                                         args = (t[::ss], y[::ss], args.period))
         nsteps_batch = min(50, args.nsteps)
