@@ -5,6 +5,7 @@ import pylab as pl
 from argparse import ArgumentParser, REMAINDER
 import os.path, subprocess
 import matplotlib.gridspec as gridspec
+import scipy.optimize as sio
 
 # Syntax for converting to animated gif:
 # convert -set delay 20 -set pause 200 -colorspace GRAY -colors 256 -dispose 1 -loop 0 -scale 50% epic210969800_QPGP_corner_???.png test.gif
@@ -75,14 +76,17 @@ def lnprob_QP(p, t, y, per_init):
         return lp + ll
     else:
         return -np.inf
+
+def nll(p, t, y):
+    return -lnlike_QP(p, t, y)
     
-def plotsample_QP(p, t, y):
+def plotsample_QP(p, t, y, tsel, ysel):
     kern, sig = kern_QP(p)
     gp = GP(kern)
-    yerr = np.ones(len(y)) * sig
-    gp.compute(t, yerr)
-    mu = gp.sample_conditional(y, t)
-    pl.plot(t, mu, color="#cc9900", alpha = 0.3)
+    yerr = np.ones(len(ysel)) * sig
+    gp.compute(tsel, yerr)
+    mu = gp.sample_conditional(ysel, t)
+    pl.plot(t, mu, color='c', alpha = 0.3)
     return
 
 def plotpred_QP(p, t, y):
@@ -94,8 +98,8 @@ def plotpred_QP(p, t, y):
     sigma = np.diag(cov)
     sigma = np.sqrt(sigma**2 + yerr**2)
     pl.fill_between(t, mu + 2 * sigma, mu - 2 * sigma, \
-                    color="#cc9900", alpha=0.3)
-    pl.plot(t, mu, color="#cc9900", lw = 2)
+                    color='c', alpha=0.3)
+    pl.plot(t, mu, color='c', lw = 2)
     nper = (len(p) - 1) / 4
     # if nper > 1:
     #     cols = ['c','m','y','k']
@@ -134,10 +138,10 @@ def labels_QP(nper, latex = True, merge = False):
         labels.append("log_wn (ppt)")
     return labels
     
-def plotchains(samples, lnp, do_cut = False):
+def plotchains(samples, lnp, do_cut = False, cut = 200):
     nwalkers, nsteps, ndim = samples.shape
     nper = (ndim - 1)/4
-    cols = ['c','m','y','k']
+    cols = ['k','c','m','y']
     labels = labels_QP(nper, merge = True)
     fig = pl.figure(figsize=(8, 1.5*6))
     gs = gridspec.GridSpec(6, 1)
@@ -148,6 +152,9 @@ def plotchains(samples, lnp, do_cut = False):
     pl.ylabel(r"$\log \, \mathrm{posterior}$")
     for j in range(nwalkers):
         pl.plot(lnp[j,:], color='k', alpha=0.3)
+    if do_cut:
+        pl.axvline(cut, color='c')
+        print 'Discarding first %d steps as burn-in' % cut
     for i in range(4):
         axc = pl.subplot(gs[i+1,0])    
         axc.yaxis.set_major_locator(pl.MaxNLocator(5, prune = 'both'))
@@ -157,21 +164,20 @@ def plotchains(samples, lnp, do_cut = False):
             for k in range(nper):
                 col = np.roll(cols, -k)[0]
                 pl.plot(samples[j,:,k*4+i], color=col, alpha = 0.3)
+        if do_cut:
+            pl.axvline(cut, color='c')
     axc = pl.subplot(gs[-1,0])    
     axc.yaxis.set_major_locator(pl.MaxNLocator(5, prune = 'both'))
-    pl.ylabel(labels[i])
+    pl.ylabel(labels[-1])
     for j in range(nwalkers):
         pl.plot(samples[j,:,-1], color='k', alpha = 0.3)
+    if do_cut:
+        pl.axvline(cut, color='c')
     pl.xlabel('iteration')
-    pl.show(block=False)
     if do_cut == True:
-        ans = int(raw_input('Enter number of iterations to discard as burn-in: '))
-        for i in range(6):
-            axc = pl.subplot(gs[i,0])
-            pl.axvline(ans, color="#cc9900")
-        print 'Discarding first %d steps as burn-in' % ans
-        return fig, samples[:,ans:,:], lnp[:,ans:]
-    return fig, samples, lnp
+        return fig, samples[:,cut:,:], lnp[:,cut:]
+    else:
+        return fig, samples, lnp
     
 if __name__ == '__main__':
     ap = ArgumentParser()
@@ -180,10 +186,14 @@ if __name__ == '__main__':
                     help='initial period estimate(s) (separated by spaces)')
     ap.add_argument('--output-dir', metavar='OD', type=str, \
                     default='.', help='directory to store output in')
+    ap.add_argument('--subsample', metavar = 'SS', type=int, default = 10, \
+                    help='subsampling factor')
     ap.add_argument('--nsteps', metavar='NS', type=int, default=1000, \
                     help='number of MCMC steps')
     ap.add_argument('--nwalkers', metavar='NW', type=int, default=24, \
                     help='number of MCMC walkers')
+    ap.add_argument('--burn-in', metavar = 'BI', type=int, default = 200, \
+                    help='number of MCMC steps to discard as burn-in')
     ap.add_argument('--do-mcmc', action='store_true', default=False, \
                     help='re-run MCMC even if results file exists')
     ap.add_argument('--plot-progress', action='store_true', default=False, \
@@ -223,24 +233,27 @@ if __name__ == '__main__':
         p_init.append(np.log10(sig)+3)
         p_init = np.array(p_init)
         ndim = len(p_init)
-        p0 = [np.array(p_init) + 1e-8 * np.random.randn(ndim) \
+        nu = int(n/args.subsample)
+        sel = np.sort(np.random.choice(n, size = nu, replace = False).astype('int'))
+        print 'Subsampling by factor %d' % args.subsample
+        print 'Number of samples used %d' % nu
+        # Try local optimization first
+        p_ref = sio.fmin(nll, p_init, args = (t[sel], y[sel]))
+        print 'initial guess:'
+        print p_init
+        print 'after local optimisation:'
+        print p_ref
+        p0 = [np.array(p_ref) + 1e-8 * np.random.randn(ndim) \
             for i in xrange(args.nwalkers)]
-        ss = 1
-        while ((20 * dt * ss) < min(args.period)):
-            ss += 1
-        ss -= 1
-        print 'Subsampling by factor %d' % ss
-        print 'Delta t effective %.2f' % (dt * ss)
-        print 'No. samples per period %.1f' % (min(args.period) / dt / ss)
         sampler = emcee.EnsembleSampler(args.nwalkers, ndim, lnprob_QP, \
-                                        args = (t[::ss], y[::ss], args.period))
+                                        args = (t[sel], y[sel], args.period))
         nsteps_batch = min(50, args.nsteps)
         nbatch = np.ceil(args.nsteps / nsteps_batch).astype('int')
         for i in range(nbatch):
             p0, _, _ = sampler.run_mcmc(p0, nsteps_batch)
             samples = sampler.chain
             lnp = sampler.lnprobability
-            np.savez_compressed(mcmc_output_file, samples = samples, lnp = lnp)
+            np.savez_compressed(mcmc_output_file, samples = samples, lnp = lnp, sel = sel)
             if args.plot_progress:                
                 if i == nbatch - 1:
                     nsteps = min(nsteps_batch, args.nsteps - i * nsteps_batch)
@@ -259,6 +272,7 @@ if __name__ == '__main__':
                                      show_titles=True, \
                                      title_kwargs={"fontsize": 12})
                 pl.savefig('%s_%03d.png' % (cornerplot_root, i))
+                pl.show(block=False)
             print 'Batch %d of %d done (%d steps per batch)' % \
               (i+1, nbatch, nsteps_batch)
         if args.plot_progress:
@@ -268,12 +282,13 @@ if __name__ == '__main__':
         data = np.load(mcmc_output_file)
         samples = data['samples']
         lnp = data['lnp']
+        sel = np.sort(data['sel'])
         
     print 'Producing final plots'
-    fig1, samples, lnp = plotchains(samples, lnp, do_cut = True)
+    fig1, samples, lnp = plotchains(samples, lnp, do_cut = True, cut = args.burn_in)
+    pl.savefig('%s_final.png' % chainplot_root)    
     nwalker, nit, ndim = samples.shape
     samples_flat = samples.reshape((nwalker * nit, ndim))
-    pl.savefig('%s_final.png' % chainplot_root)    
     fig2 = corner.corner(samples_flat, \
                          labels = labels_QP(nper), \
                          quantiles=[0.16, 0.84], \
@@ -303,27 +318,28 @@ if __name__ == '__main__':
         pl.xlabel('time (d)')
         pl.ylabel('norm. flux')
         print 'Plotting LC with predictive distribution'
-        ss = 1
-        while ((80 * dt * ss) < min(args.period)):
-            ss += 1
-        ss -= 1
-        plotpred_QP(samples_flat[imax,:], t[::ss], y[::ss])
+        plotpred_QP(samples_flat[imax,:], t[sel], y[sel])
         pl.plot(t, y, 'k.', alpha = 0.5)
+        pl.plot(t[sel], y[sel], 'c.')
         pl.xlim(t[0], t[-1])
         # Zoom in
         tmid = (t[-1] + t[0])/2
         l = abs(t-tmid) <= max(args.period)
-        t = t[l]
-        y = y[l]
+        lsel = abs(t[sel]-tmid) <= max(args.period)
+        tt = t[l]
+        yy = y[l]
+        tsel = t[sel][lsel]
+        ysel = y[sel][lsel]
         gs = gridspec.GridSpec(1, 1)
         gs.update(left=0.7, right=0.98, bottom = 0.13, top = 0.95)
         ax2 = pl.subplot(gs[0,0], sharey = ax1)    
         pl.setp(ax2.get_yticklabels(), visible=False)
-        pl.plot(t, y, 'k.', alpha = 0.5)
+        pl.plot(tt, yy, 'k.', alpha = 0.5)
+        pl.plot(tsel, ysel, 'c.')
         nsamp_tpl = 10
         for s in samples_flat[np.random.randint(len(samples), \
                                                 size = nsamp_tpl)]:
-            plotsample_QP(s, t[::ss], y[::ss])
-        pl.xlim(t[0], t[-1])
+            plotsample_QP(s, tt, yy, tsel, ysel)
+        pl.xlim(tt[0], tt[-1])
         pl.savefig('%s_QPGP_%d_pred.png' % (dfname, nper))
 
